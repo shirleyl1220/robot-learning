@@ -14,7 +14,9 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
+import numpy as np
 import torch
+# from hw3_imitation_learning.hw3 import model
 import zarr as zarr_lib
 from hw3.dataset import (
     Normalizer,
@@ -34,6 +36,72 @@ LR = 1e-4
 VAL_SPLIT = 0.1
 
 
+def debug_data(states: np.ndarray, actions: np.ndarray, normalizer, state_keys, action_keys) -> None:
+    print("\n=== DATA DEBUG ===")
+
+    # 1. Check for NaNs/Infs in raw data
+    print(f"States NaN: {np.isnan(states).any()}, Inf: {np.isinf(states).any()}")
+    print(f"Actions NaN: {np.isnan(actions).any()}, Inf: {np.isinf(actions).any()}")
+
+    # 2. Flag near-zero-variance state dims (will be ~noise after normalization)
+    low_var = np.where(states.std(axis=0) < 1e-4)[0]
+    if len(low_var):
+        print(f"WARNING: near-constant state dims (std < 1e-4): {low_var.tolist()}")
+    else:
+        print("State dims: all have reasonable variance")
+
+    # 3. Action statistics in raw space
+    print(f"Action mean: {actions.mean(axis=0).round(4)}")
+    print(f"Action std:  {actions.std(axis=0).round(4)}")
+    print(f"Action min:  {actions.min(axis=0).round(4)}")
+    print(f"Action max:  {actions.max(axis=0).round(4)}")
+
+    # 4. Normalized action range sanity check (should be roughly [-3, 3])
+    norm_actions = normalizer.normalize_action(actions)
+    print(f"Normalized action std:  {norm_actions.std(axis=0).round(3)}")
+    print(f"Normalized action max abs: {np.abs(norm_actions).max(axis=0).round(3)}")
+
+    # 5. Goal distribution (if state_goal is in state_keys)
+    if state_keys and any("state_goal" in k for k in state_keys):
+        goal_idx = sum(
+            (3 if "[:3]" in k or "original_pos" in k or "state_ee_xyz" in k else
+             1 if "state_gripper" in k else 3)
+            for k in state_keys
+            if "state_goal" not in k and k != list(filter(lambda x: "state_goal" in x, state_keys))[0]
+        )
+        # Simpler: just print raw state_goal column counts
+        goal_cols = states[:, 9:12] if states.shape[1] > 11 else None
+        if goal_cols is not None:
+            counts = goal_cols.sum(axis=0)
+            print(f"Goal class counts (red/green/blue) at idx 9:12: {counts.astype(int)}")
+
+    print("==================\n")
+
+
+@torch.no_grad()
+def debug_predictions(model, loader, device, epoch) -> None:
+    """Print prediction vs target stats for first batch."""
+    model.eval()
+    states, action_chunks = next(iter(loader))
+    states, action_chunks = states.to(device), action_chunks.to(device)
+    pred = model(states)
+
+    pred_mean = pred.mean().item()
+    pred_std = pred.std().item()
+    target_std = action_chunks.std().item()
+    per_dim_mse = ((pred - action_chunks) ** 2).mean(dim=(0, 1))
+
+    print(f"\n[Epoch {epoch}] Prediction debug:")
+    print(f"  pred  mean={pred_mean:.4f}  std={pred_std:.4f}")
+    print(f"  target std={target_std:.4f}  (should be ~1 if normalized)")
+    print(f"  per action-dim MSE: {per_dim_mse.cpu().numpy().round(4)}")
+
+    grad_norm = sum(
+        p.grad.norm().item() ** 2 for p in model.parameters() if p.grad is not None
+    ) ** 0.5
+    print(f"  grad norm (last step): {grad_norm:.4f}")
+
+
 def train_one_epoch(
     model: BasePolicy,
     loader: DataLoader,
@@ -51,6 +119,7 @@ def train_one_epoch(
         loss = model.compute_loss(states, action_chunks)
         optimizer.zero_grad()
         loss.backward()
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
         optimizer.step()
         total_loss += loss.item()
         n_batches += 1
@@ -155,6 +224,7 @@ def main() -> None:
     )
     print(f"Dataset: {len(dataset)} samples, chunk_size={args.chunk_size}")
     print(f"  state_dim={states.shape[1]}, action_dim={actions.shape[1]}")
+    debug_data(states, actions, normalizer, args.state_keys, args.action_keys)
 
     # ── train / val split ─────────────────────────────────────────────
     n_val = max(1, int(len(dataset) * VAL_SPLIT))
@@ -182,7 +252,7 @@ def main() -> None:
     print(f"Model parameters: {n_params:,}")
 
     # TODO: implement an optimizer and scheduler
-    optimizer = torch.optim.Adam(model.parameters(), lr=LR)
+    optimizer = torch.optim.Adam(model.parameters(), lr=1e-4, weight_decay=1e-4)
     scheduler = scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=EPOCHS)
 
     # ── training loop ─────────────────────────────────────────────────
@@ -217,6 +287,9 @@ def main() -> None:
         train_loss = train_one_epoch(model, train_loader, optimizer, device)
         val_loss = evaluate(model, val_loader, device)
         scheduler.step()
+
+        if epoch == 1 or epoch % 50 == 0:
+            debug_predictions(model, val_loader, device, epoch)
 
         tag = ""
         if val_loss < best_val:

@@ -39,9 +39,8 @@ class ObstaclePolicy(BasePolicy):
 
     def __init__(self, state_dim: int, action_dim: int, chunk_size: int) -> None:
         super().__init__(state_dim, action_dim, chunk_size)
-        self.smoothness_weight = 0.1
         self.action_deadband = 1e-3
-        hidden_dim = 512
+        hidden_dim = 256
         self.mlp = nn.Sequential(
             nn.Linear(state_dim, hidden_dim),
             nn.LayerNorm(hidden_dim),
@@ -63,15 +62,7 @@ class ObstaclePolicy(BasePolicy):
 
     def compute_loss(self, state: torch.Tensor, action_chunk: torch.Tensor) -> torch.Tensor:
         pred = self(state)
-        mse = torch.nn.functional.mse_loss(pred, action_chunk)
-
-        # Temporal smoothness regularization over chunk dimension to reduce jitter.
-        if pred.shape[1] > 1:
-            delta = pred[:, 1:, :] - pred[:, :-1, :]
-            smooth = (delta ** 2).mean()
-            return mse + self.smoothness_weight * smooth
-
-        return mse
+        return torch.nn.functional.mse_loss(pred, action_chunk)
 
     def sample_actions(self, state: torch.Tensor) -> torch.Tensor:
         out = self(state)
@@ -147,12 +138,11 @@ class ObstaclePolicy(BasePolicy):
 #     #     return flat_actions.view(batch_size, self.chunk_size, self.action_dim)
 
 class MultiTaskPolicy(BasePolicy):
-    def __init__(self, state_dim, action_dim, chunk_size, goal_idx_start=9, goal_idx_end=12):
+    def __init__(self, state_dim, action_dim, chunk_size, goal_idx_start=21, goal_idx_end=24):
         super().__init__(state_dim, action_dim, chunk_size)
         self.goal_idx_start = goal_idx_start
         self.goal_idx_end = goal_idx_end
         hidden_dim = 512
-        self.smoothness_weight = 0.1
         self.action_deadband = 1e-3
 
         # encode goal separately and project to hidden dim
@@ -173,12 +163,13 @@ class MultiTaskPolicy(BasePolicy):
             nn.Linear(hidden_dim * 2, hidden_dim),
             nn.LayerNorm(hidden_dim),
             nn.ReLU(),
+            nn.Dropout(0.1),
             nn.Linear(hidden_dim, hidden_dim),
             nn.LayerNorm(hidden_dim),
             nn.ReLU(),
+            nn.Dropout(0.1),
             nn.Linear(hidden_dim, chunk_size * action_dim),
         )
-
     def forward(self, state):
         goal = state[:, self.goal_idx_start:self.goal_idx_end]
         goal_features = self.goal_encoder(goal)
@@ -189,12 +180,7 @@ class MultiTaskPolicy(BasePolicy):
 
     def compute_loss(self, state, action_chunk):
         pred = self(state)
-        mse = torch.nn.functional.mse_loss(pred, action_chunk)
-        if pred.shape[1] > 1:
-            delta = pred[:, 1:, :] - pred[:, :-1, :]
-            smooth = (delta ** 2).mean()
-            return mse + self.smoothness_weight * smooth
-        return mse
+        return torch.nn.functional.mse_loss(pred, action_chunk)
 
     def sample_actions(self, state):
         out = self(state)
