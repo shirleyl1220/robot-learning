@@ -65,10 +65,11 @@ def main():
 
     set_seed(seed)
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    # device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    # if device.type == "cuda":
+    #     print(f"GPU name: {torch.cuda.get_device_name(0)}")
+    device = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
     print(f"Using device: {device}")
-    if device.type == "cuda":
-        print(f"GPU name: {torch.cuda.get_device_name(0)}")
 
     xml_path = ROOT_DIR / "assets" / "mujoco" / "so100_pos_ctrl.xml"
     env = SO100RLEnv(xml_path=xml_path, render_mode=None)
